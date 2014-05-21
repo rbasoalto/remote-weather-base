@@ -1,8 +1,20 @@
 #include <msp430.h>
 #include <stdio.h>
 #include <string.h>
-#include "dht22.h"
 #include "msprf24.h"
+
+union {
+  struct {
+    uint8_t hh;
+    uint8_t hl;
+    uint8_t th;
+    uint8_t tl;
+    uint8_t crc;
+  } val;
+  uint8_t bytes[5];
+} dht_data;
+
+#define UART_DEBUG
 
 #ifdef UART_DEBUG
 char txbuf[256];
@@ -72,52 +84,33 @@ int main() {
   _BIS_SR(GIE);
 #ifdef UART_DEBUG
   uart_setup();
-  uart_send(sprintf(txbuf, "Hello! Starting up...\r\n"));
 #endif
   radio_setup();
-#ifdef UART_DEBUG
-  uart_send(sprintf(txbuf, "Radio is ready...\r\n"));
-#endif
 
-  while(1) {
-    P1OUT &= ~BIT0;
-    verylongdelay();
-#ifdef UART_DEBUG
-    uart_send(sprintf(txbuf, "Starting read\r\n"));
-#endif
-    dht_start_read();
-#ifdef UART_DEBUG
-    int t = dht_get_temp();
-    int h = dht_get_rh();
-    uart_send(sprintf(txbuf, "%3d.%1d C; %3d.%1d %%RH\r\n", t/10, t%10, h/10, h%10));
-#endif
-    memcpy(buf, dht_get_data(), 5);
-    w_tx_payload(5, buf);
-    msprf24_activate_tx();
-#ifdef UART_DEBUG
-    uart_send(sprintf(txbuf, "Message TX started\r\n"));
-#endif
-    LPM0;
-#ifdef UART_DEBUG
-    uart_send(sprintf(txbuf, "Interrupt received!\r\n"));
-#endif
+  // flush RX just in case
+  if (!(RF24_RX_EMPTY & msprf24_queue_state())) {
+    flush_rx();
+  }
+  msprf24_activate_rx();
+  LPM4;
+
+  while (1) {
     if (rf_irq & RF24_IRQ_FLAGGED) {
       rf_irq &= ~RF24_IRQ_FLAGGED;
       msprf24_get_irq_reason();
-      if (rf_irq & RF24_IRQ_TX) {
-        P1OUT &= ~BIT0;
-#ifdef UART_DEBUG
-        uart_send(sprintf(txbuf, "TX Success!\r\n"));
-#endif
-      }
-      if(rf_irq & RF24_IRQ_TXFAILED) {
-        P1OUT |= BIT0;
-#ifdef UART_DEBUG
-        uart_send(sprintf(txbuf, "TX Failed!\r\n"));
-#endif
-      }
-      msprf24_irq_clear(RF24_IRQ_MASK);
     }
+    if (rf_irq & RF24_IRQ_RX || msprf24_rx_pending()) {
+      uint8_t nextPayloadSize = r_rx_peek_payload_size();
+      r_rx_payload(nextPayloadSize, buf);
+      msprf24_irq_clear(RF24_IRQ_MASK);
+      memcpy(dht_data.bytes, buf, nextPayloadSize);
+#ifdef UART_DEBUG
+      int t = (((dht_data.val.th&0x7f)<<8) + dht_data.val.tl)*((dht_data.val.th&0x80)?-1:1);
+      int h = (dht_data.val.hh<<8) + (dht_data.val.hl);
+      uart_send(sprintf(txbuf, "%d.%1d;%d.%1d\r\n", t/10, t%10, h/10, h%10));
+#endif
+    }
+    LPM4;
   }
 
   return 0;
